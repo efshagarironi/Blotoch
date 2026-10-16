@@ -1,0 +1,321 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Generate project
+        run: |
+          mkdir -p app/src/main/java/com/btauto
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'BtAutoConnect'
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.3.2' apply false }
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.btauto'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.btauto'
+              minSdk 26
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+            <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+            <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+            <application android:label="BT Auto" android:theme="@android:style/Theme.DeviceDefault.Light">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <service android:name=".BtService" android:exported="false"
+                       android:foregroundServiceType="connectedDevice"/>
+              <receiver android:name=".BootReceiver" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                </intent-filter>
+              </receiver>
+            </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/btauto/MainActivity.java <<'EOF'
+          package com.btauto;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.bluetooth.BluetoothAdapter;
+          import android.bluetooth.BluetoothDevice;
+          import android.bluetooth.BluetoothManager;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.widget.CheckBox;
+          import android.widget.CompoundButton;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import java.util.ArrayList;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+            LinearLayout box;
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              ScrollView sv = new ScrollView(this);
+              box = new LinearLayout(this);
+              box.setOrientation(LinearLayout.VERTICAL);
+              box.setPadding(32, 64, 32, 32);
+              sv.addView(box);
+              setContentView(sv);
+              List<String> need = new ArrayList<>();
+              if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                need.add(Manifest.permission.BLUETOOTH_CONNECT);
+              if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                need.add(Manifest.permission.POST_NOTIFICATIONS);
+              if (need.isEmpty()) load(); else requestPermissions(need.toArray(new String[0]), 1);
+            }
+
+            @Override public void onRequestPermissionsResult(int c, String[] p, int[] r) { load(); }
+
+            void apply(Set<String> sel) {
+              SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
+              sp.edit().putStringSet("sel", new HashSet<>(sel)).apply();
+              Intent i = new Intent(this, BtService.class);
+              if (sel.isEmpty()) stopService(i); else startForegroundService(i);
+            }
+
+            void load() {
+              box.removeAllViews();
+              TextView t = new TextView(this);
+              t.setText("دستگاه‌هایی که می‌خواهید خودکار وصل شوند را انتخاب کنید:");
+              t.setTextSize(18);
+              box.addView(t);
+              final Set<String> sel = new HashSet<>(getSharedPreferences("bt", MODE_PRIVATE).getStringSet("sel", new HashSet<String>()));
+              try {
+                BluetoothAdapter ad = ((BluetoothManager) getSystemService(BLUETOOTH_SERVICE)).getAdapter();
+                Set<BluetoothDevice> bonded = ad.getBondedDevices();
+                if (bonded.isEmpty()) {
+                  TextView e = new TextView(this);
+                  e.setText("ابتدا دستگاه را یک بار از تنظیمات اندروید جفت (Pair) کنید.");
+                  box.addView(e);
+                }
+                for (final BluetoothDevice d : bonded) {
+                  CheckBox cb = new CheckBox(this);
+                  cb.setText(d.getName() + "\n" + d.getAddress());
+                  cb.setChecked(sel.contains(d.getAddress()));
+                  cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(CompoundButton v, boolean on) {
+                      if (on) sel.add(d.getAddress()); else sel.remove(d.getAddress());
+                      apply(sel);
+                    }
+                  });
+                  box.addView(cb);
+                }
+              } catch (SecurityException e) { }
+              if (!sel.isEmpty()) apply(sel);
+            }
+          }
+          EOF
+          cat > app/src/main/java/com/btauto/BootReceiver.java <<'EOF'
+          package com.btauto;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import java.util.HashSet;
+
+          public class BootReceiver extends BroadcastReceiver {
+            @Override public void onReceive(Context c, Intent i) {
+              if (!c.getSharedPreferences("bt", Context.MODE_PRIVATE).getStringSet("sel", new HashSet<String>()).isEmpty()) {
+                try { c.startForegroundService(new Intent(c, BtService.class)); } catch (Exception e) { }
+              }
+            }
+          }
+          EOF
+          cat > app/src/main/java/com/btauto/BtService.java <<'EOF'
+          package com.btauto;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.Service;
+          import android.bluetooth.BluetoothAdapter;
+          import android.bluetooth.BluetoothClass;
+          import android.bluetooth.BluetoothDevice;
+          import android.bluetooth.BluetoothProfile;
+          import android.bluetooth.BluetoothSocket;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.content.pm.ServiceInfo;
+          import android.os.Build;
+          import android.os.IBinder;
+          import java.lang.reflect.Method;
+          import java.util.HashMap;
+          import java.util.HashSet;
+          import java.util.Map;
+          import java.util.Set;
+          import java.util.UUID;
+
+          public class BtService extends Service {
+            static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+            BluetoothAdapter ad;
+            volatile int gen = 0;
+            volatile BluetoothProfile a2dp, hfp;
+            final Map<String, BluetoothSocket> socks = new HashMap<>();
+
+            final BroadcastReceiver rx = new BroadcastReceiver() {
+              @Override public void onReceive(Context c, Intent i) {
+                int s = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
+                if (s == BluetoothAdapter.STATE_ON) begin();
+                else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) stopAll();
+              }
+            };
+
+            @Override public void onCreate() {
+              super.onCreate();
+              ad = BluetoothAdapter.getDefaultAdapter();
+              NotificationManager nm = getSystemService(NotificationManager.class);
+              nm.createNotificationChannel(new NotificationChannel("bt", "BT Auto", NotificationManager.IMPORTANCE_LOW));
+              Notification n = new Notification.Builder(this, "bt")
+                  .setContentTitle("اتصال خودکار بلوتوث فعال است")
+                  .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth).build();
+              if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+              else startForeground(1, n);
+              registerReceiver(rx, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
+            }
+
+            @Override public int onStartCommand(Intent i, int f, int id) {
+              if (ad != null && ad.isEnabled()) begin();
+              return START_STICKY;
+            }
+
+            @Override public IBinder onBind(Intent i) { return null; }
+
+            @Override public void onDestroy() {
+              try { unregisterReceiver(rx); } catch (Exception e) { }
+              stopAll();
+              super.onDestroy();
+            }
+
+            void proxies() {
+              BluetoothProfile.ServiceListener l = new BluetoothProfile.ServiceListener() {
+                @Override public void onServiceConnected(int p, BluetoothProfile pr) {
+                  if (p == BluetoothProfile.A2DP) a2dp = pr; else if (p == BluetoothProfile.HEADSET) hfp = pr;
+                }
+                @Override public void onServiceDisconnected(int p) {
+                  if (p == BluetoothProfile.A2DP) a2dp = null; else if (p == BluetoothProfile.HEADSET) hfp = null;
+                }
+              };
+              try {
+                if (a2dp == null) ad.getProfileProxy(this, l, BluetoothProfile.A2DP);
+                if (hfp == null) ad.getProfileProxy(this, l, BluetoothProfile.HEADSET);
+              } catch (Exception e) { }
+            }
+
+            void begin() {
+              final int g = ++gen;
+              proxies();
+              new Thread(new Runnable() { @Override public void run() { loop(g); } }).start();
+            }
+
+            void loop(int g) {
+              for (int i = 0; i < 150 && g == gen; i++) {
+                boolean all = true;
+                Set<String> sel = getSharedPreferences("bt", MODE_PRIVATE).getStringSet("sel", new HashSet<String>());
+                for (String addr : sel) {
+                  try {
+                    if (!tryConnect(ad.getRemoteDevice(addr))) all = false;
+                  } catch (Throwable e) { all = false; }
+                }
+                if (all) break;
+                try { Thread.sleep(i < 6 ? 500 : 2000); } catch (InterruptedException e) { return; }
+              }
+            }
+
+            boolean tryConnect(BluetoothDevice d) throws Exception {
+              BluetoothClass c = d.getBluetoothClass();
+              boolean audio = c != null && c.getMajorDeviceClass() == BluetoothClass.Device.Major.AUDIO_VIDEO;
+              if (audio) {
+                boolean ok = false;
+                for (BluetoothProfile p : new BluetoothProfile[] { a2dp, hfp }) {
+                  if (p == null) continue;
+                  if (p.getConnectedDevices().contains(d)) { ok = true; continue; }
+                  try {
+                    Method m = p.getClass().getDeclaredMethod("connect", BluetoothDevice.class);
+                    m.setAccessible(true);
+                    m.invoke(p, d);
+                  } catch (Throwable t) { }
+                }
+                return ok;
+              }
+              BluetoothSocket s = socks.get(d.getAddress());
+              if (s != null && s.isConnected()) return true;
+              ad.cancelDiscovery();
+              s = d.createRfcommSocketToServiceRecord(SPP);
+              try {
+                s.connect();
+              } catch (Exception e) {
+                try { s.close(); } catch (Exception x) { }
+                throw e;
+              }
+              socks.put(d.getAddress(), s);
+              return true;
+            }
+
+            void stopAll() {
+              gen++;
+              for (BluetoothSocket s : socks.values()) { try { s.close(); } catch (Exception e) { } }
+              socks.clear();
+              try {
+                if (a2dp != null) ad.closeProfileProxy(BluetoothProfile.A2DP, a2dp);
+                if (hfp != null) ad.closeProfileProxy(BluetoothProfile.HEADSET, hfp);
+              } catch (Exception e) { }
+              a2dp = null;
+              hfp = null;
+            }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BtAutoConnect
+          path: app/build/outputs/apk/debug/app-debug.apk
