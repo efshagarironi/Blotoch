@@ -14,7 +14,7 @@ jobs:
           gradle-version: '8.7'
       - name: Generate project
         run: |
-          mkdir -p app/src/main/java/com/btauto
+          mkdir -p app/src/main/java/com/btauto app/src/main/res/drawable app/src/main/res/mipmap-anydpi-v26
           cat > settings.gradle <<'EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
@@ -33,8 +33,8 @@ jobs:
               applicationId 'com.btauto'
               minSdk 26
               targetSdk 34
-              versionCode 1
-              versionName '1.0'
+              versionCode 2
+              versionName '1.1'
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
@@ -52,7 +52,10 @@ jobs:
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
             <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
             <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-            <application android:label="BT Auto" android:theme="@android:style/Theme.DeviceDefault.Light">
+            <application android:label="BT Auto"
+                         android:icon="@mipmap/ic_launcher"
+                         android:roundIcon="@mipmap/ic_launcher_round"
+                         android:theme="@android:style/Theme.DeviceDefault.Light">
               <activity android:name=".MainActivity" android:exported="true">
                 <intent-filter>
                   <action android:name="android.intent.action.MAIN"/>
@@ -69,6 +72,38 @@ jobs:
             </application>
           </manifest>
           EOF
+          cat > app/src/main/res/drawable/ic_bg.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+            <path android:fillColor="#1565C0" android:pathData="M0,0h108v108h-108z"/>
+          </vector>
+          EOF
+          cat > app/src/main/res/drawable/ic_fg.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+            <path android:strokeColor="#FFFFFF" android:strokeWidth="4"
+                  android:strokeLineCap="round" android:strokeLineJoin="round"
+                  android:pathData="M33,58 L33,52 A21,21 0 0 1 75,52 L75,58"/>
+            <path android:fillColor="#FFFFFF"
+                  android:pathData="M31,58 L35,58 Q37,58 37,60 L37,72 Q37,74 35,74 L31,74 Q29,74 29,72 L29,60 Q29,58 31,58 Z"/>
+            <path android:fillColor="#FFFFFF"
+                  android:pathData="M73,58 L77,58 Q79,58 79,60 L79,72 Q79,74 77,74 L73,74 Q71,74 71,72 L71,60 Q71,58 73,58 Z"/>
+            <path android:strokeColor="#82E0FF" android:strokeWidth="3.2"
+                  android:strokeLineCap="round" android:strokeLineJoin="round"
+                  android:pathData="M46,48 L62,62 L54,70 L54,38 L62,46 L46,60"/>
+          </vector>
+          EOF
+          for n in ic_launcher ic_launcher_round; do
+          cat > app/src/main/res/mipmap-anydpi-v26/$n.xml <<'EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@drawable/ic_bg"/>
+            <foreground android:drawable="@drawable/ic_fg"/>
+            <monochrome android:drawable="@drawable/ic_fg"/>
+          </adaptive-icon>
+          EOF
+          done
           cat > app/src/main/java/com/btauto/MainActivity.java <<'EOF'
           package com.btauto;
 
@@ -80,10 +115,12 @@ jobs:
           import android.content.Intent;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
+          import android.graphics.Typeface;
           import android.os.Build;
           import android.os.Bundle;
+          import android.provider.Settings;
+          import android.widget.Button;
           import android.widget.CheckBox;
-          import android.widget.CompoundButton;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.TextView;
@@ -94,13 +131,16 @@ jobs:
 
           public class MainActivity extends Activity {
             LinearLayout box;
+            boolean ready = false;
+            Set<String> m = new HashSet<>();
+            Set<String> c = new HashSet<>();
 
             @Override protected void onCreate(Bundle b) {
               super.onCreate(b);
               ScrollView sv = new ScrollView(this);
               box = new LinearLayout(this);
               box.setOrientation(LinearLayout.VERTICAL);
-              box.setPadding(32, 64, 32, 32);
+              box.setPadding(32, 64, 32, 64);
               sv.addView(box);
               setContentView(sv);
               List<String> need = new ArrayList<>();
@@ -108,47 +148,81 @@ jobs:
                 need.add(Manifest.permission.BLUETOOTH_CONNECT);
               if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                 need.add(Manifest.permission.POST_NOTIFICATIONS);
-              if (need.isEmpty()) load(); else requestPermissions(need.toArray(new String[0]), 1);
+              if (need.isEmpty()) { ready = true; load(); }
+              else requestPermissions(need.toArray(new String[0]), 1);
             }
 
-            @Override public void onRequestPermissionsResult(int c, String[] p, int[] r) { load(); }
+            @Override protected void onResume() {
+              super.onResume();
+              if (ready) load();
+            }
 
-            void apply(Set<String> sel) {
-              SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
-              sp.edit().putStringSet("sel", new HashSet<>(sel)).apply();
+            @Override public void onRequestPermissionsResult(int rc, String[] p, int[] r) {
+              ready = true;
+              load();
+            }
+
+            void save() {
+              Set<String> u = new HashSet<>(m);
+              u.addAll(c);
+              getSharedPreferences("bt", MODE_PRIVATE).edit()
+                  .putStringSet("m", new HashSet<>(m))
+                  .putStringSet("c", new HashSet<>(c))
+                  .putStringSet("sel", u).apply();
               Intent i = new Intent(this, BtService.class);
-              if (sel.isEmpty()) stopService(i); else startForegroundService(i);
+              if (u.isEmpty()) stopService(i); else startForegroundService(i);
+            }
+
+            CheckBox cb(String text, boolean on, final Set<String> target, final String addr) {
+              CheckBox x = new CheckBox(this);
+              x.setText(text);
+              x.setChecked(on);
+              x.setOnCheckedChangeListener((v, checked) -> {
+                if (checked) target.add(addr); else target.remove(addr);
+                save();
+              });
+              return x;
             }
 
             void load() {
               box.removeAllViews();
+              SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
+              m = new HashSet<>(sp.getStringSet("m", new HashSet<String>()));
+              c = new HashSet<>(sp.getStringSet("c", new HashSet<String>()));
+              Set<String> old = sp.getStringSet("sel", new HashSet<String>());
+              if (m.isEmpty() && c.isEmpty()) { m.addAll(old); c.addAll(old); }
+
               TextView t = new TextView(this);
-              t.setText("دستگاه‌هایی که می‌خواهید خودکار وصل شوند را انتخاب کنید:");
-              t.setTextSize(18);
+              t.setText("برای هر دستگاه مشخص کنید خودکار برای چه کاری وصل شود. اگر تیک یک گزینه را نزنید، آن کار از طریق گوشی انجام می‌شود (موزیک از بلندگوی گوشی / تماس با گوشی).");
+              t.setTextSize(16);
               box.addView(t);
-              final Set<String> sel = new HashSet<>(getSharedPreferences("bt", MODE_PRIVATE).getStringSet("sel", new HashSet<String>()));
+
+              Button b = new Button(this);
+              b.setText("جفت‌سازی دستگاه جدید (تنظیمات بلوتوث)");
+              b.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)));
+              box.addView(b);
+
               try {
                 BluetoothAdapter ad = ((BluetoothManager) getSystemService(BLUETOOTH_SERVICE)).getAdapter();
                 Set<BluetoothDevice> bonded = ad.getBondedDevices();
                 if (bonded.isEmpty()) {
                   TextView e = new TextView(this);
-                  e.setText("ابتدا دستگاه را یک بار از تنظیمات اندروید جفت (Pair) کنید.");
+                  e.setText("هنوز دستگاهی جفت نشده است.");
                   box.addView(e);
                 }
-                for (final BluetoothDevice d : bonded) {
-                  CheckBox cb = new CheckBox(this);
-                  cb.setText(d.getName() + "\n" + d.getAddress());
-                  cb.setChecked(sel.contains(d.getAddress()));
-                  cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-                    @Override public void onCheckedChanged(CompoundButton v, boolean on) {
-                      if (on) sel.add(d.getAddress()); else sel.remove(d.getAddress());
-                      apply(sel);
-                    }
-                  });
-                  box.addView(cb);
+                for (BluetoothDevice d : bonded) {
+                  final String a = d.getAddress();
+                  TextView nm = new TextView(this);
+                  nm.setText(d.getName() == null ? a : d.getName());
+                  nm.setTextSize(17);
+                  nm.setTypeface(null, Typeface.BOLD);
+                  nm.setPadding(0, 40, 0, 0);
+                  box.addView(nm);
+                  box.addView(cb("پخش موزیک و صدا", m.contains(a), m, a));
+                  box.addView(cb("پاسخ به تماس (هندزفری)", c.contains(a), c, a));
                 }
               } catch (SecurityException e) { }
-              if (!sel.isEmpty()) apply(sel);
+              if (!m.isEmpty() || !c.isEmpty()) save();
             }
           }
           EOF
@@ -175,37 +249,60 @@ jobs:
           import android.app.NotificationChannel;
           import android.app.NotificationManager;
           import android.app.Service;
+          import android.bluetooth.BluetoothA2dp;
           import android.bluetooth.BluetoothAdapter;
           import android.bluetooth.BluetoothClass;
           import android.bluetooth.BluetoothDevice;
+          import android.bluetooth.BluetoothHeadset;
           import android.bluetooth.BluetoothProfile;
           import android.bluetooth.BluetoothSocket;
           import android.content.BroadcastReceiver;
           import android.content.Context;
           import android.content.Intent;
           import android.content.IntentFilter;
+          import android.content.SharedPreferences;
           import android.content.pm.ServiceInfo;
           import android.os.Build;
           import android.os.IBinder;
+          import android.os.ParcelUuid;
           import java.lang.reflect.Method;
-          import java.util.HashMap;
           import java.util.HashSet;
           import java.util.Map;
           import java.util.Set;
           import java.util.UUID;
+          import java.util.concurrent.ConcurrentHashMap;
 
           public class BtService extends Service {
             static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
             BluetoothAdapter ad;
             volatile int gen = 0;
             volatile BluetoothProfile a2dp, hfp;
-            final Map<String, BluetoothSocket> socks = new HashMap<>();
+            final Map<String, BluetoothSocket> socks = new ConcurrentHashMap<>();
 
             final BroadcastReceiver rx = new BroadcastReceiver() {
               @Override public void onReceive(Context c, Intent i) {
                 int s = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
                 if (s == BluetoothAdapter.STATE_ON) begin();
                 else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) stopAll();
+              }
+            };
+
+            // اگر پروفایلی که کاربر نخواسته وصل شد، فوراً قطع می‌شود
+            final BroadcastReceiver rx2 = new BroadcastReceiver() {
+              @Override public void onReceive(Context c, Intent i) {
+                try {
+                  BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                  if (d == null || i.getIntExtra(BluetoothProfile.EXTRA_STATE, -1) != BluetoothProfile.STATE_CONNECTED) return;
+                  boolean isA = BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED.equals(i.getAction());
+                  SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
+                  Set<String> sel = sp.getStringSet("sel", new HashSet<String>());
+                  Set<String> allowed = sp.getStringSet(isA ? "m" : "c", new HashSet<String>());
+                  String a = d.getAddress();
+                  if (sel.contains(a) && !allowed.contains(a)) {
+                    BluetoothProfile p = isA ? a2dp : hfp;
+                    if (p != null) call(p, "disconnect", d);
+                  }
+                } catch (Throwable t) { }
               }
             };
 
@@ -220,6 +317,10 @@ jobs:
               if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
               else startForeground(1, n);
               registerReceiver(rx, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
+              IntentFilter f2 = new IntentFilter();
+              f2.addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED);
+              f2.addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED);
+              registerReceiver(rx2, f2);
             }
 
             @Override public int onStartCommand(Intent i, int f, int id) {
@@ -231,6 +332,7 @@ jobs:
 
             @Override public void onDestroy() {
               try { unregisterReceiver(rx); } catch (Exception e) { }
+              try { unregisterReceiver(rx2); } catch (Exception e) { }
               stopAll();
               super.onDestroy();
             }
@@ -259,34 +361,54 @@ jobs:
             void loop(int g) {
               for (int i = 0; i < 150 && g == gen; i++) {
                 boolean all = true;
-                Set<String> sel = getSharedPreferences("bt", MODE_PRIVATE).getStringSet("sel", new HashSet<String>());
+                SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
+                Set<String> sel = sp.getStringSet("sel", new HashSet<String>());
                 for (String addr : sel) {
                   try {
-                    if (!tryConnect(ad.getRemoteDevice(addr))) all = false;
+                    if (!tryConnect(ad.getRemoteDevice(addr), sp)) all = false;
                   } catch (Throwable e) { all = false; }
                 }
-                if (all) break;
+                if (all && i >= 8) break;
                 try { Thread.sleep(i < 6 ? 500 : 2000); } catch (InterruptedException e) { return; }
               }
             }
 
-            boolean tryConnect(BluetoothDevice d) throws Exception {
-              BluetoothClass c = d.getBluetoothClass();
-              boolean audio = c != null && c.getMajorDeviceClass() == BluetoothClass.Device.Major.AUDIO_VIDEO;
+            boolean hasUuid(BluetoothDevice d, String u) {
+              ParcelUuid[] a = d.getUuids();
+              if (a == null) return false;
+              for (ParcelUuid p : a) if (p.toString().toLowerCase().startsWith(u)) return true;
+              return false;
+            }
+
+            void call(BluetoothProfile p, String name, BluetoothDevice d) {
+              try {
+                Method m = p.getClass().getDeclaredMethod(name, BluetoothDevice.class);
+                m.setAccessible(true);
+                m.invoke(p, d);
+              } catch (Throwable t) { }
+            }
+
+            boolean tryConnect(BluetoothDevice d, SharedPreferences sp) throws Exception {
+              String a = d.getAddress();
+              BluetoothClass bc = d.getBluetoothClass();
+              boolean audio = (bc != null && bc.getMajorDeviceClass() == BluetoothClass.Device.Major.AUDIO_VIDEO)
+                  || hasUuid(d, "0000110b") || hasUuid(d, "0000111e") || hasUuid(d, "00001108");
               if (audio) {
-                boolean ok = false;
-                for (BluetoothProfile p : new BluetoothProfile[] { a2dp, hfp }) {
-                  if (p == null) continue;
-                  if (p.getConnectedDevices().contains(d)) { ok = true; continue; }
-                  try {
-                    Method m = p.getClass().getDeclaredMethod("connect", BluetoothDevice.class);
-                    m.setAccessible(true);
-                    m.invoke(p, d);
-                  } catch (Throwable t) { }
+                Set<String> m = sp.getStringSet("m", new HashSet<String>());
+                Set<String> c = sp.getStringSet("c", new HashSet<String>());
+                BluetoothProfile[] ps = { a2dp, hfp };
+                boolean[] want = { m.contains(a), c.contains(a) };
+                boolean ok = true;
+                for (int k = 0; k < 2; k++) {
+                  BluetoothProfile p = ps[k];
+                  if (p == null) { if (want[k]) ok = false; continue; }
+                  boolean on = p.getConnectedDevices().contains(d);
+                  if (want[k] && !on) { call(p, "connect", d); ok = false; }
+                  else if (!want[k] && on) { call(p, "disconnect", d); ok = false; }
                 }
                 return ok;
               }
-              BluetoothSocket s = socks.get(d.getAddress());
+              BluetoothSocket s = socks.get(a);
               if (s != null && s.isConnected()) return true;
               ad.cancelDiscovery();
               s = d.createRfcommSocketToServiceRecord(SPP);
@@ -296,7 +418,7 @@ jobs:
                 try { s.close(); } catch (Exception x) { }
                 throw e;
               }
-              socks.put(d.getAddress(), s);
+              socks.put(a, s);
               return true;
             }
 
