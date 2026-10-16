@@ -47,7 +47,7 @@ jobs:
               minSdk 26
               targetSdk 34
               versionCode((System.currentTimeMillis().intdiv(60000L)) as int)
-              versionName '1.6'
+              versionName '1.7'
             }
             signingConfigs {
               btauto {
@@ -331,6 +331,12 @@ jobs:
               if (ready && screen == 0) load();
             }
 
+            @Override protected void onDestroy() {
+              // آزاد کردن ارجاع‌ها تا هیچ نشتی از Activity باقی نماند
+              try { scrim.animate().cancel(); drawer.animate().cancel(); } catch (Throwable t) { }
+              super.onDestroy();
+            }
+
             @Override public void onRequestPermissionsResult(int rc, String[] perms, int[] res) {
               ready = true;
               showDevices();
@@ -375,6 +381,7 @@ jobs:
               } catch (Throwable t) { }
             }
 
+            // ذخیره تنظیمات؛ سرویس فقط یک بار و اجباری دوباره اجرا می‌شود تا تغییرات اعمال شود
             void save() {
               Set<String> u = new HashSet<>(m);
               u.addAll(c);
@@ -385,7 +392,7 @@ jobs:
                   .putStringSet("p", new HashSet<>(p))
                   .putStringSet("sel", u).apply();
               if (u.isEmpty()) stopService(new Intent(this, BtService.class));
-              else BtService.start(this);
+              else BtService.start(this, true);
             }
 
             CheckBox cb(String text, boolean on, final Set<String> target, final String addr) {
@@ -406,7 +413,8 @@ jobs:
               c = new HashSet<>(sp.getStringSet("c", new HashSet<String>()));
               p = new HashSet<>(sp.getStringSet("p", new HashSet<String>()));
               Set<String> old = sp.getStringSet("sel", new HashSet<String>());
-              if (m.isEmpty() && c.isEmpty() && p.isEmpty()) { m.addAll(old); c.addAll(old); }
+              boolean migrated = false;
+              if (m.isEmpty() && c.isEmpty() && p.isEmpty() && !old.isEmpty()) { m.addAll(old); c.addAll(old); migrated = true; }
               p.removeAll(c);
 
               // حالت تضمینی
@@ -473,7 +481,10 @@ jobs:
                   devBox.addView(kp);
                 }
               } catch (SecurityException e) { }
-              if (!m.isEmpty() || !c.isEmpty() || !p.isEmpty()) save();
+
+              // فقط در صورت مهاجرت تنظیمات قدیمی ذخیره می‌شود؛ در غیر این صورت فقط در صورت نیاز سرویس بالا می‌آید (بدون شروع دوباره‌ی اتصال)
+              if (migrated) save();
+              else if (!m.isEmpty() || !c.isEmpty() || !p.isEmpty()) BtService.start(this);
             }
 
             // ---------- پشتیبان‌گیری ----------
@@ -485,15 +496,18 @@ jobs:
 
             String readFile(File f) throws Exception {
               FileInputStream is = new FileInputStream(f);
-              byte[] buf = new byte[(int) f.length()];
-              int n = 0;
-              while (n < buf.length) {
-                int r = is.read(buf, n, buf.length - n);
-                if (r < 0) break;
-                n += r;
+              try {
+                byte[] buf = new byte[(int) f.length()];
+                int n = 0;
+                while (n < buf.length) {
+                  int r = is.read(buf, n, buf.length - n);
+                  if (r < 0) break;
+                  n += r;
+                }
+                return new String(buf, 0, n, "UTF-8");
+              } finally {
+                is.close();
               }
-              is.close();
-              return new String(buf, 0, n, "UTF-8");
             }
 
             Set<String> toSet(JSONArray a) {
@@ -524,8 +538,7 @@ jobs:
                 String name = "backup_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".json";
                 File f = new File(dir, name);
                 FileOutputStream os = new FileOutputStream(f);
-                os.write(o.toString().getBytes("UTF-8"));
-                os.close();
+                try { os.write(o.toString().getBytes("UTF-8")); } finally { os.close(); }
                 Toast.makeText(this, "پشتیبان ذخیره شد:\n" + f.getAbsolutePath(), Toast.LENGTH_LONG).show();
                 if (screen == 1) showBackups();
               } catch (Exception e) {
@@ -663,7 +676,7 @@ jobs:
               if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(act)) {
                 int s = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
                 if (s == BluetoothAdapter.STATE_TURNING_ON || s == BluetoothAdapter.STATE_ON) {
-                  BtService.start(c);
+                  BtService.start(c, true);
                 } else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) {
                   if (!BtService.always(c)) c.stopService(new Intent(c, BtService.class));
                 }
@@ -710,6 +723,7 @@ jobs:
             static volatile boolean running = false;
             BluetoothAdapter ad;
             volatile int gen = 0;
+            volatile Thread worker;
             volatile BluetoothProfile a2dp, hfp;
             final Map<String, BluetoothSocket> socks = new ConcurrentHashMap<>();
 
@@ -718,8 +732,12 @@ jobs:
               return c.getSharedPreferences("bt", Context.MODE_PRIVATE).getBoolean("always", true);
             }
 
-            static void start(Context c) {
+            static void start(Context c) { start(c, false); }
+
+            // force=false: اگر سرویس در حال اجراست کاری نمی‌کند (جلوگیری از کار تکراری)
+            static void start(Context c, boolean force) {
               try {
+                if (!force && running) return;
                 Set<String> sel = c.getSharedPreferences("bt", Context.MODE_PRIVATE).getStringSet("sel", new HashSet<String>());
                 if (sel.isEmpty()) return;
                 if (!always(c)) {
@@ -732,7 +750,7 @@ jobs:
               } catch (Throwable t) { }
             }
 
-            // با خاموش شدن بلوتوث همه‌ی اتصال‌ها بسته می‌شود (تنظیمات دست‌نخورده می‌ماند)
+            // با خاموش شدن بلوتوث همه‌ی اتصال‌ها و نخ‌ها بسته می‌شود (تنظیمات دست‌نخورده می‌ماند)
             final BroadcastReceiver rx = new BroadcastReceiver() {
               @Override public void onReceive(Context c, Intent i) {
                 int s = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
@@ -846,14 +864,20 @@ jobs:
               } catch (Exception e) { }
             }
 
+            // فقط یک نخ اتصال وجود دارد؛ نخ قبلی قطع و آزاد می‌شود (بدون نشتی)
             void begin() {
               final int g = ++gen;
               proxies();
-              new Thread(new Runnable() { @Override public void run() { loop(g); } }).start();
+              Thread old = worker;
+              if (old != null) old.interrupt();
+              Thread t = new Thread(() -> loop(g), "bt-conn");
+              worker = t;
+              t.start();
             }
 
+            // تلاش‌ها به‌تدریج کم‌تعدادتر می‌شوند (صرفه‌جویی در باتری)؛ با وصل شدن همه‌ی دستگاه‌ها نخ تمام می‌شود
             void loop(int g) {
-              for (int i = 0; i < 150 && g == gen; i++) {
+              for (int i = 0; i < 60 && g == gen; i++) {
                 boolean all = true;
                 SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
                 Set<String> sel = sp.getStringSet("sel", new HashSet<String>());
@@ -863,8 +887,9 @@ jobs:
                   } catch (Throwable e) { all = false; }
                 }
                 if (all && i >= 8) break;
-                try { Thread.sleep(i < 6 ? 700 : 3000); } catch (InterruptedException e) { return; }
+                try { Thread.sleep(i < 6 ? 700 : (i < 30 ? 3000 : 10000)); } catch (InterruptedException e) { return; }
               }
+              if (g == gen) worker = null;
             }
 
             boolean hasUuid(BluetoothDevice d, String u) {
@@ -925,6 +950,9 @@ jobs:
 
             void stopAll() {
               gen++;
+              Thread w = worker;
+              worker = null;
+              if (w != null) w.interrupt();
               for (BluetoothSocket s : socks.values()) { try { s.close(); } catch (Exception e) { } }
               socks.clear();
               try {
