@@ -47,7 +47,7 @@ jobs:
               minSdk 26
               targetSdk 34
               versionCode((System.currentTimeMillis().intdiv(60000L)) as int)
-              versionName '1.3'
+              versionName '1.4'
             }
             signingConfigs {
               btauto {
@@ -93,6 +93,12 @@ jobs:
               <receiver android:name=".BootReceiver" android:exported="true">
                 <intent-filter>
                   <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                </intent-filter>
+              </receiver>
+              <receiver android:name=".BtStateReceiver" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.bluetooth.adapter.action.STATE_CHANGED"/>
+                  <action android:name="android.bluetooth.device.action.ACL_CONNECTED"/>
                 </intent-filter>
               </receiver>
             </application>
@@ -361,8 +367,9 @@ jobs:
                   .putStringSet("c", new HashSet<>(c))
                   .putStringSet("p", new HashSet<>(p))
                   .putStringSet("sel", u).apply();
-              Intent i = new Intent(this, BtService.class);
-              if (u.isEmpty()) stopService(i); else startForegroundService(i);
+              // سرویس فقط وقتی بلوتوث روشن است اجرا می‌شود؛ در غیر این صورت فقط تنظیمات ذخیره می‌شود
+              if (u.isEmpty()) stopService(new Intent(this, BtService.class));
+              else BtService.start(this);
             }
 
             CheckBox cb(String text, boolean on, final Set<String> target, final String addr) {
@@ -601,12 +608,38 @@ jobs:
           import android.content.BroadcastReceiver;
           import android.content.Context;
           import android.content.Intent;
-          import java.util.HashSet;
 
           public class BootReceiver extends BroadcastReceiver {
             @Override public void onReceive(Context c, Intent i) {
-              if (!c.getSharedPreferences("bt", Context.MODE_PRIVATE).getStringSet("sel", new HashSet<String>()).isEmpty()) {
-                try { c.startForegroundService(new Intent(c, BtService.class)); } catch (Exception e) { }
+              // فقط اگر بلوتوث روشن باشد و دستگاهی انتخاب شده باشد، سرویس شروع می‌شود
+              BtService.start(c);
+            }
+          }
+          EOF
+          cat > app/src/main/java/com/btauto/BtStateReceiver.java <<'EOF'
+          package com.btauto;
+
+          import android.bluetooth.BluetoothAdapter;
+          import android.bluetooth.BluetoothDevice;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          // برنامه همیشه در پس‌زمینه نیست؛ این گیرنده با روشن/خاموش شدن بلوتوث سرویس را شروع یا متوقف می‌کند
+          public class BtStateReceiver extends BroadcastReceiver {
+            @Override public void onReceive(Context c, Intent i) {
+              String act = i.getAction();
+              if (act == null) return;
+              if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(act)) {
+                int s = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
+                if (s == BluetoothAdapter.STATE_TURNING_ON || s == BluetoothAdapter.STATE_ON) {
+                  BtService.start(c);
+                } else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) {
+                  c.stopService(new Intent(c, BtService.class));
+                }
+              } else if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(act)) {
+                // پشتیبان: اگر به هر دلیل سرویس اجرا نیست ولی بلوتوث روشن است
+                if (!BtService.running) BtService.start(c);
               }
             }
           }
@@ -645,16 +678,34 @@ jobs:
 
           public class BtService extends Service {
             static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+            static volatile boolean running = false;
             BluetoothAdapter ad;
             volatile int gen = 0;
             volatile BluetoothProfile a2dp, hfp;
             final Map<String, BluetoothSocket> socks = new ConcurrentHashMap<>();
 
+            // شروع سرویس: فقط اگر بلوتوث روشن (یا در حال روشن شدن) است و دستگاهی انتخاب شده
+            static void start(Context c) {
+              try {
+                BluetoothAdapter a = BluetoothAdapter.getDefaultAdapter();
+                if (a == null) return;
+                int st = a.getState();
+                if (st != BluetoothAdapter.STATE_ON && st != BluetoothAdapter.STATE_TURNING_ON) return;
+                Set<String> sel = c.getSharedPreferences("bt", Context.MODE_PRIVATE).getStringSet("sel", new HashSet<String>());
+                if (sel.isEmpty()) return;
+                c.startForegroundService(new Intent(c, BtService.class));
+              } catch (Throwable t) { }
+            }
+
+            // با خاموش شدن بلوتوث، سرویس بلافاصله بسته می‌شود (تنظیمات ذخیره‌شده دست‌نخورده می‌ماند)
             final BroadcastReceiver rx = new BroadcastReceiver() {
               @Override public void onReceive(Context c, Intent i) {
                 int s = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
                 if (s == BluetoothAdapter.STATE_ON) begin();
-                else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) stopAll();
+                else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) {
+                  stopAll();
+                  stopSelf();
+                }
               }
             };
 
@@ -708,6 +759,7 @@ jobs:
 
             @Override public void onCreate() {
               super.onCreate();
+              running = true;
               ad = BluetoothAdapter.getDefaultAdapter();
               NotificationManager nm = getSystemService(NotificationManager.class);
               nm.createNotificationChannel(new NotificationChannel("bt", "BT Auto", NotificationManager.IMPORTANCE_LOW));
@@ -725,13 +777,22 @@ jobs:
             }
 
             @Override public int onStartCommand(Intent i, int f, int id) {
-              if (ad != null && ad.isEnabled()) begin();
-              return START_STICKY;
+              int st = ad == null ? BluetoothAdapter.STATE_OFF : ad.getState();
+              if (st == BluetoothAdapter.STATE_ON) {
+                begin();
+              } else if (st != BluetoothAdapter.STATE_TURNING_ON) {
+                // بلوتوث خاموش است؛ سرویس لازم نیست
+                stopAll();
+                stopSelf();
+              }
+              // اگر در حال روشن شدن است، گیرنده rx با STATE_ON کار را شروع می‌کند
+              return START_NOT_STICKY;
             }
 
             @Override public IBinder onBind(Intent i) { return null; }
 
             @Override public void onDestroy() {
+              running = false;
               try { unregisterReceiver(rx); } catch (Exception e) { }
               try { unregisterReceiver(rx2); } catch (Exception e) { }
               try { unregisterReceiver(rx3); } catch (Exception e) { }
