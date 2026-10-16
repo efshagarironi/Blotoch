@@ -47,7 +47,7 @@ jobs:
               minSdk 26
               targetSdk 34
               versionCode((System.currentTimeMillis().intdiv(60000L)) as int)
-              versionName '1.4'
+              versionName '1.5'
             }
             signingConfigs {
               btauto {
@@ -78,6 +78,7 @@ jobs:
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
             <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
             <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+            <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
             <application android:label="BT Auto"
                          android:icon="@mipmap/ic_launcher"
                          android:roundIcon="@mipmap/ic_launcher_round"
@@ -356,6 +357,22 @@ jobs:
               content.addView(devScroll);
               updateBar();
               load();
+              askBattery();
+            }
+
+            // درخواست استثنا از بهینه‌سازی باتری (برای اجازه شروع سرویس از پس‌زمینه) - فقط یک بار
+            void askBattery() {
+              try {
+                SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
+                if (sp.getBoolean("askedBat", false)) return;
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+                if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                  sp.edit().putBoolean("askedBat", true).apply();
+                  Intent bi = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                  bi.setData(android.net.Uri.parse("package:" + getPackageName()));
+                  startActivity(bi);
+                }
+              } catch (Throwable t) { }
             }
 
             void save() {
