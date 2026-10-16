@@ -47,7 +47,7 @@ jobs:
               minSdk 26
               targetSdk 34
               versionCode((System.currentTimeMillis().intdiv(60000L)) as int)
-              versionName '1.2'
+              versionName '1.3'
             }
             signingConfigs {
               btauto {
@@ -73,6 +73,7 @@ jobs:
             <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
             <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
             <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+            <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
             <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
@@ -180,8 +181,9 @@ jobs:
             TextView title, btnMenu, btnDelete;
             boolean ready = false, drawerOpen = false, selecting = false;
             int screen = 0;
-            Set<String> m = new HashSet<>();
-            Set<String> c = new HashSet<>();
+            Set<String> m = new HashSet<>();   // موزیک و صدا
+            Set<String> c = new HashSet<>();   // تماس با هندزفری
+            Set<String> p = new HashSet<>();   // تماس با گوشی
             Set<String> selected = new HashSet<>();
 
             int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
@@ -322,7 +324,7 @@ jobs:
               if (ready && screen == 0) load();
             }
 
-            @Override public void onRequestPermissionsResult(int rc, String[] p, int[] r) {
+            @Override public void onRequestPermissionsResult(int rc, String[] perms, int[] res) {
               ready = true;
               showDevices();
             }
@@ -353,9 +355,11 @@ jobs:
             void save() {
               Set<String> u = new HashSet<>(m);
               u.addAll(c);
+              u.addAll(p);
               getSharedPreferences("bt", MODE_PRIVATE).edit()
                   .putStringSet("m", new HashSet<>(m))
                   .putStringSet("c", new HashSet<>(c))
+                  .putStringSet("p", new HashSet<>(p))
                   .putStringSet("sel", u).apply();
               Intent i = new Intent(this, BtService.class);
               if (u.isEmpty()) stopService(i); else startForegroundService(i);
@@ -377,11 +381,13 @@ jobs:
               SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
               m = new HashSet<>(sp.getStringSet("m", new HashSet<String>()));
               c = new HashSet<>(sp.getStringSet("c", new HashSet<String>()));
+              p = new HashSet<>(sp.getStringSet("p", new HashSet<String>()));
               Set<String> old = sp.getStringSet("sel", new HashSet<String>());
-              if (m.isEmpty() && c.isEmpty()) { m.addAll(old); c.addAll(old); }
+              if (m.isEmpty() && c.isEmpty() && p.isEmpty()) { m.addAll(old); c.addAll(old); }
+              p.removeAll(c);
 
               TextView t = new TextView(this);
-              t.setText("برای هر دستگاه مشخص کنید خودکار برای چه کاری وصل شود. اگر تیک یک گزینه را نزنید، آن کار از طریق گوشی انجام می‌شود (موزیک از بلندگوی گوشی / تماس با گوشی).");
+              t.setText("برای هر دستگاه مشخص کنید خودکار برای چه کاری وصل شود. اگر تیک یک گزینه را نزنید، آن کار از طریق گوشی انجام می‌شود. از دو گزینه «پاسخ به تماس» فقط یکی می‌تواند فعال باشد.");
               t.setTextSize(16);
               devBox.addView(t);
 
@@ -407,10 +413,28 @@ jobs:
                   nm.setPadding(0, dp(16), 0, 0);
                   devBox.addView(nm);
                   devBox.addView(cb("پخش موزیک و صدا", m.contains(a), m, a));
-                  devBox.addView(cb("پاسخ به تماس (هندزفری)", c.contains(a), c, a));
+
+                  final CheckBox kc = new CheckBox(this);
+                  final CheckBox kp = new CheckBox(this);
+                  kc.setText("پاسخ به تماس (هندزفری)");
+                  kp.setText("پاسخ به تماس (گوشی)");
+                  kc.setChecked(c.contains(a));
+                  kp.setChecked(p.contains(a));
+                  kc.setOnCheckedChangeListener((v, on) -> {
+                    if (on) { c.add(a); p.remove(a); kp.setChecked(false); }
+                    else c.remove(a);
+                    save();
+                  });
+                  kp.setOnCheckedChangeListener((v, on) -> {
+                    if (on) { p.add(a); c.remove(a); kc.setChecked(false); }
+                    else p.remove(a);
+                    save();
+                  });
+                  devBox.addView(kc);
+                  devBox.addView(kp);
                 }
               } catch (SecurityException e) { }
-              if (!m.isEmpty() || !c.isEmpty()) save();
+              if (!m.isEmpty() || !c.isEmpty() || !p.isEmpty()) save();
             }
 
             // ---------- پشتیبان‌گیری ----------
@@ -444,6 +468,7 @@ jobs:
                 JSONObject o = new JSONObject(readFile(f));
                 Set<String> u = toSet(o.optJSONArray("m"));
                 u.addAll(toSet(o.optJSONArray("c")));
+                u.addAll(toSet(o.optJSONArray("p")));
                 return u.size();
               } catch (Exception e) { return -1; }
             }
@@ -454,6 +479,7 @@ jobs:
                 JSONObject o = new JSONObject();
                 o.put("m", new JSONArray(sp.getStringSet("m", new HashSet<String>())));
                 o.put("c", new JSONArray(sp.getStringSet("c", new HashSet<String>())));
+                o.put("p", new JSONArray(sp.getStringSet("p", new HashSet<String>())));
                 File dir = backupDir();
                 dir.mkdirs();
                 String name = "backup_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".json";
@@ -558,6 +584,8 @@ jobs:
                 JSONObject o = new JSONObject(readFile(f));
                 m = toSet(o.optJSONArray("m"));
                 c = toSet(o.optJSONArray("c"));
+                p = toSet(o.optJSONArray("p"));
+                p.removeAll(c);
                 save();
                 Toast.makeText(this, "بازیابی شد", Toast.LENGTH_SHORT).show();
                 showDevices();
@@ -603,6 +631,8 @@ jobs:
           import android.content.IntentFilter;
           import android.content.SharedPreferences;
           import android.content.pm.ServiceInfo;
+          import android.media.AudioDeviceInfo;
+          import android.media.AudioManager;
           import android.os.Build;
           import android.os.IBinder;
           import android.os.ParcelUuid;
@@ -640,8 +670,37 @@ jobs:
                   Set<String> allowed = sp.getStringSet(isA ? "m" : "c", new HashSet<String>());
                   String a = d.getAddress();
                   if (sel.contains(a) && !allowed.contains(a)) {
-                    BluetoothProfile p = isA ? a2dp : hfp;
-                    if (p != null) call(p, "disconnect", d);
+                    BluetoothProfile pr = isA ? a2dp : hfp;
+                    if (pr != null) call(pr, "disconnect", d);
+                  }
+                } catch (Throwable t) { }
+              }
+            };
+
+            // «پاسخ به تماس (گوشی)»: وقتی صدای تماس (ورودی یا خروجی) به دستگاه بلوتوث می‌رود، از آن گرفته و به گوشی داده می‌شود
+            final BroadcastReceiver rx3 = new BroadcastReceiver() {
+              @Override public void onReceive(Context c, Intent i) {
+                try {
+                  BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                  if (d == null) return;
+                  Set<String> ph = getSharedPreferences("bt", MODE_PRIVATE).getStringSet("p", new HashSet<String>());
+                  if (!ph.contains(d.getAddress())) return;
+                  int st = i.getIntExtra(BluetoothProfile.EXTRA_STATE, -1);
+                  AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                  if (st == BluetoothHeadset.STATE_AUDIO_CONNECTED) {
+                    try { am.stopBluetoothSco(); am.setBluetoothScoOn(false); } catch (Throwable t) { }
+                    if (Build.VERSION.SDK_INT >= 31) {
+                      try {
+                        for (AudioDeviceInfo ai : am.getAvailableCommunicationDevices()) {
+                          if (ai.getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) { am.setCommunicationDevice(ai); break; }
+                        }
+                      } catch (Throwable t) { }
+                    }
+                    if (hfp != null) call(hfp, "disconnect", d);
+                  } else if (st == BluetoothHeadset.STATE_AUDIO_DISCONNECTED) {
+                    if (Build.VERSION.SDK_INT >= 31) {
+                      try { am.clearCommunicationDevice(); } catch (Throwable t) { }
+                    }
                   }
                 } catch (Throwable t) { }
               }
@@ -662,6 +721,7 @@ jobs:
               f2.addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED);
               f2.addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED);
               registerReceiver(rx2, f2);
+              registerReceiver(rx3, new IntentFilter(BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED));
             }
 
             @Override public int onStartCommand(Intent i, int f, int id) {
@@ -674,17 +734,18 @@ jobs:
             @Override public void onDestroy() {
               try { unregisterReceiver(rx); } catch (Exception e) { }
               try { unregisterReceiver(rx2); } catch (Exception e) { }
+              try { unregisterReceiver(rx3); } catch (Exception e) { }
               stopAll();
               super.onDestroy();
             }
 
             void proxies() {
               BluetoothProfile.ServiceListener l = new BluetoothProfile.ServiceListener() {
-                @Override public void onServiceConnected(int p, BluetoothProfile pr) {
-                  if (p == BluetoothProfile.A2DP) a2dp = pr; else if (p == BluetoothProfile.HEADSET) hfp = pr;
+                @Override public void onServiceConnected(int pf, BluetoothProfile pr) {
+                  if (pf == BluetoothProfile.A2DP) a2dp = pr; else if (pf == BluetoothProfile.HEADSET) hfp = pr;
                 }
-                @Override public void onServiceDisconnected(int p) {
-                  if (p == BluetoothProfile.A2DP) a2dp = null; else if (p == BluetoothProfile.HEADSET) hfp = null;
+                @Override public void onServiceDisconnected(int pf) {
+                  if (pf == BluetoothProfile.A2DP) a2dp = null; else if (pf == BluetoothProfile.HEADSET) hfp = null;
                 }
               };
               try {
@@ -717,15 +778,15 @@ jobs:
             boolean hasUuid(BluetoothDevice d, String u) {
               ParcelUuid[] a = d.getUuids();
               if (a == null) return false;
-              for (ParcelUuid p : a) if (p.toString().toLowerCase().startsWith(u)) return true;
+              for (ParcelUuid pu : a) if (pu.toString().toLowerCase().startsWith(u)) return true;
               return false;
             }
 
-            void call(BluetoothProfile p, String name, BluetoothDevice d) {
+            void call(BluetoothProfile pr, String name, BluetoothDevice d) {
               try {
-                Method m = p.getClass().getDeclaredMethod(name, BluetoothDevice.class);
-                m.setAccessible(true);
-                m.invoke(p, d);
+                Method mt = pr.getClass().getDeclaredMethod(name, BluetoothDevice.class);
+                mt.setAccessible(true);
+                mt.invoke(pr, d);
               } catch (Throwable t) { }
             }
 
@@ -741,17 +802,17 @@ jobs:
                 boolean[] want = { m.contains(a), c.contains(a) };
                 boolean ok = true;
                 for (int k = 0; k < 2; k++) {
-                  BluetoothProfile p = ps[k];
-                  if (p == null) { if (want[k]) ok = false; continue; }
-                  int st = p.getConnectionState(d);
+                  BluetoothProfile pr = ps[k];
+                  if (pr == null) { if (want[k]) ok = false; continue; }
+                  int st = pr.getConnectionState(d);
                   if (want[k]) {
                     if (st != BluetoothProfile.STATE_CONNECTED) {
                       ok = false;
-                      if (st == BluetoothProfile.STATE_DISCONNECTED) call(p, "connect", d);
+                      if (st == BluetoothProfile.STATE_DISCONNECTED) call(pr, "connect", d);
                     }
                   } else if (st == BluetoothProfile.STATE_CONNECTED) {
                     ok = false;
-                    call(p, "disconnect", d);
+                    call(pr, "disconnect", d);
                   }
                 }
                 return ok;
