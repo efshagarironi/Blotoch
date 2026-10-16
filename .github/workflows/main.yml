@@ -3,6 +3,8 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -12,6 +14,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
+      - name: Fixed signing key
+        run: |
+          if [ ! -f keystore/btauto.jks ]; then
+            mkdir -p keystore
+            keytool -genkeypair -keystore keystore/btauto.jks -storetype PKCS12 -alias btauto -keyalg RSA -keysize 2048 -validity 36500 -storepass btauto123 -keypass btauto123 -dname "CN=BtAuto"
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add -f keystore/btauto.jks
+            git commit -m "add signing keystore"
+            git push || echo "PUSH FAILED: enable Read and write permissions for workflows"
+          fi
       - name: Generate project
         run: |
           mkdir -p app/src/main/java/com/btauto app/src/main/res/drawable app/src/main/res/mipmap-anydpi-v26
@@ -33,10 +46,22 @@ jobs:
               applicationId 'com.btauto'
               minSdk 26
               targetSdk 34
-              versionCode 2
-              versionName '1.1'
+              versionCode((System.currentTimeMillis().intdiv(60000L)) as int)
+              versionName '1.2'
+            }
+            signingConfigs {
+              btauto {
+                storeFile rootProject.file('keystore/btauto.jks')
+                storePassword 'btauto123'
+                keyAlias 'btauto'
+                keyPassword 'btauto123'
+              }
+            }
+            buildTypes {
+              debug { signingConfig signingConfigs.btauto }
             }
             compileOptions {
+              encoding 'UTF-8'
               sourceCompatibility JavaVersion.VERSION_17
               targetCompatibility JavaVersion.VERSION_17
             }
@@ -55,7 +80,7 @@ jobs:
             <application android:label="BT Auto"
                          android:icon="@mipmap/ic_launcher"
                          android:roundIcon="@mipmap/ic_launcher_round"
-                         android:theme="@android:style/Theme.DeviceDefault.Light">
+                         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
               <activity android:name=".MainActivity" android:exported="true">
                 <intent-filter>
                   <action android:name="android.intent.action.MAIN"/>
@@ -109,56 +134,219 @@ jobs:
 
           import android.Manifest;
           import android.app.Activity;
+          import android.app.AlertDialog;
           import android.bluetooth.BluetoothAdapter;
           import android.bluetooth.BluetoothDevice;
           import android.bluetooth.BluetoothManager;
           import android.content.Intent;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
+          import android.graphics.Color;
           import android.graphics.Typeface;
           import android.os.Build;
           import android.os.Bundle;
           import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
           import android.widget.Button;
           import android.widget.CheckBox;
+          import android.widget.FrameLayout;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.TextView;
+          import android.widget.Toast;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.text.SimpleDateFormat;
           import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Date;
           import java.util.HashSet;
           import java.util.List;
+          import java.util.Locale;
           import java.util.Set;
 
           public class MainActivity extends Activity {
-            LinearLayout box;
-            boolean ready = false;
+            static final int MP = ViewGroup.LayoutParams.MATCH_PARENT;
+            static final int WC = ViewGroup.LayoutParams.WRAP_CONTENT;
+            FrameLayout root, content;
+            LinearLayout drawer, subMenu, devBox, backupList;
+            ScrollView devScroll, backupScroll;
+            View scrim;
+            TextView title, btnMenu, btnDelete;
+            boolean ready = false, drawerOpen = false, selecting = false;
+            int screen = 0;
             Set<String> m = new HashSet<>();
             Set<String> c = new HashSet<>();
+            Set<String> selected = new HashSet<>();
+
+            int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
 
             @Override protected void onCreate(Bundle b) {
               super.onCreate(b);
-              ScrollView sv = new ScrollView(this);
-              box = new LinearLayout(this);
-              box.setOrientation(LinearLayout.VERTICAL);
-              box.setPadding(32, 64, 32, 64);
-              sv.addView(box);
-              setContentView(sv);
+              root = new FrameLayout(this);
+              root.setBackgroundColor(Color.WHITE);
+
+              LinearLayout main = new LinearLayout(this);
+              main.setOrientation(LinearLayout.VERTICAL);
+
+              LinearLayout bar = new LinearLayout(this);
+              bar.setOrientation(LinearLayout.HORIZONTAL);
+              bar.setGravity(Gravity.CENTER_VERTICAL);
+              bar.setBackgroundColor(0xFF1565C0);
+
+              btnMenu = new TextView(this);
+              btnMenu.setText("☰");
+              btnMenu.setTextSize(26);
+              btnMenu.setTextColor(Color.WHITE);
+              btnMenu.setGravity(Gravity.CENTER);
+              btnMenu.setPadding(dp(16), 0, dp(16), 0);
+              btnMenu.setOnClickListener(v -> {
+                if (selecting) exitSelection();
+                else if (drawerOpen) closeDrawer();
+                else openDrawer();
+              });
+              bar.addView(btnMenu, new LinearLayout.LayoutParams(WC, dp(56)));
+
+              title = new TextView(this);
+              title.setTextColor(Color.WHITE);
+              title.setTextSize(18);
+              title.setGravity(Gravity.CENTER_VERTICAL);
+              bar.addView(title, new LinearLayout.LayoutParams(0, dp(56), 1f));
+
+              btnDelete = new TextView(this);
+              btnDelete.setText("🗑 حذف");
+              btnDelete.setTextSize(16);
+              btnDelete.setTextColor(Color.WHITE);
+              btnDelete.setGravity(Gravity.CENTER);
+              btnDelete.setPadding(dp(16), 0, dp(16), 0);
+              btnDelete.setVisibility(View.GONE);
+              btnDelete.setOnClickListener(v -> confirmDelete());
+              bar.addView(btnDelete, new LinearLayout.LayoutParams(WC, dp(56)));
+
+              main.addView(bar, new LinearLayout.LayoutParams(MP, WC));
+              content = new FrameLayout(this);
+              main.addView(content, new LinearLayout.LayoutParams(MP, 0, 1f));
+              root.addView(main, new FrameLayout.LayoutParams(MP, MP));
+
+              devScroll = new ScrollView(this);
+              devBox = new LinearLayout(this);
+              devBox.setOrientation(LinearLayout.VERTICAL);
+              devBox.setPadding(dp(16), dp(16), dp(16), dp(32));
+              devScroll.addView(devBox);
+
+              backupScroll = new ScrollView(this);
+              backupList = new LinearLayout(this);
+              backupList.setOrientation(LinearLayout.VERTICAL);
+              backupList.setPadding(dp(8), dp(8), dp(8), dp(32));
+              backupScroll.addView(backupList);
+
+              scrim = new View(this);
+              scrim.setBackgroundColor(0x66000000);
+              scrim.setVisibility(View.GONE);
+              scrim.setOnClickListener(v -> closeDrawer());
+              root.addView(scrim, new FrameLayout.LayoutParams(MP, MP));
+
+              drawer = new LinearLayout(this);
+              drawer.setOrientation(LinearLayout.VERTICAL);
+              drawer.setBackgroundColor(Color.WHITE);
+              drawer.setElevation(dp(16));
+              drawer.setTranslationX(-dp(280));
+              TextView hd = new TextView(this);
+              hd.setText("BT Auto");
+              hd.setTextSize(22);
+              hd.setTypeface(null, Typeface.BOLD);
+              hd.setTextColor(Color.WHITE);
+              hd.setBackgroundColor(0xFF1565C0);
+              hd.setPadding(dp(20), dp(40), dp(20), dp(20));
+              drawer.addView(hd, new LinearLayout.LayoutParams(MP, WC));
+              drawer.addView(item("دستگاه‌ها", 0, v -> { closeDrawer(); showDevices(); }), new LinearLayout.LayoutParams(MP, WC));
+              drawer.addView(item("پشتیبانی ▾", 0, v -> subMenu.setVisibility(subMenu.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE)), new LinearLayout.LayoutParams(MP, WC));
+              subMenu = new LinearLayout(this);
+              subMenu.setOrientation(LinearLayout.VERTICAL);
+              subMenu.setVisibility(View.GONE);
+              subMenu.addView(item("گرفتن پشتیبان", 28, v -> { closeDrawer(); takeBackup(); }), new LinearLayout.LayoutParams(MP, WC));
+              subMenu.addView(item("فراخوان پشتیبان", 28, v -> { closeDrawer(); showBackups(); }), new LinearLayout.LayoutParams(MP, WC));
+              drawer.addView(subMenu, new LinearLayout.LayoutParams(MP, WC));
+              root.addView(drawer, new FrameLayout.LayoutParams(dp(280), MP));
+
+              setContentView(root);
+
               List<String> need = new ArrayList<>();
               if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
                 need.add(Manifest.permission.BLUETOOTH_CONNECT);
               if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                 need.add(Manifest.permission.POST_NOTIFICATIONS);
-              if (need.isEmpty()) { ready = true; load(); }
+              if (need.isEmpty()) { ready = true; showDevices(); }
               else requestPermissions(need.toArray(new String[0]), 1);
+            }
+
+            TextView item(String text, int indent, View.OnClickListener l) {
+              TextView t = new TextView(this);
+              t.setText(text);
+              t.setTextSize(17);
+              t.setTextColor(0xFF212121);
+              t.setPadding(dp(20 + indent), dp(14), dp(20), dp(14));
+              t.setBackgroundResource(android.R.drawable.list_selector_background);
+              t.setOnClickListener(l);
+              return t;
+            }
+
+            void openDrawer() {
+              drawerOpen = true;
+              scrim.setAlpha(0f);
+              scrim.setVisibility(View.VISIBLE);
+              scrim.animate().alpha(1f).setDuration(150);
+              drawer.animate().translationX(0).setDuration(200);
+            }
+
+            void closeDrawer() {
+              drawerOpen = false;
+              scrim.animate().alpha(0f).setDuration(150).withEndAction(() -> { if (!drawerOpen) scrim.setVisibility(View.GONE); });
+              drawer.animate().translationX(-dp(280)).setDuration(200);
+            }
+
+            @Override public void onBackPressed() {
+              if (drawerOpen) closeDrawer();
+              else if (selecting) exitSelection();
+              else if (screen == 1) showDevices();
+              else super.onBackPressed();
             }
 
             @Override protected void onResume() {
               super.onResume();
-              if (ready) load();
+              if (ready && screen == 0) load();
             }
 
             @Override public void onRequestPermissionsResult(int rc, String[] p, int[] r) {
               ready = true;
+              showDevices();
+            }
+
+            void updateBar() {
+              if (screen == 1 && selecting) {
+                title.setText(selected.size() + " مورد انتخاب شده");
+                btnDelete.setVisibility(View.VISIBLE);
+                btnMenu.setText("✕");
+              } else {
+                title.setText(screen == 1 ? "فراخوان پشتیبان" : "اتصال خودکار بلوتوث");
+                btnDelete.setVisibility(View.GONE);
+                btnMenu.setText("☰");
+              }
+            }
+
+            // ---------- صفحه دستگاه‌ها ----------
+            void showDevices() {
+              screen = 0;
+              selecting = false;
+              selected.clear();
+              content.removeAllViews();
+              content.addView(devScroll);
+              updateBar();
               load();
             }
 
@@ -185,7 +373,7 @@ jobs:
             }
 
             void load() {
-              box.removeAllViews();
+              devBox.removeAllViews();
               SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
               m = new HashSet<>(sp.getStringSet("m", new HashSet<String>()));
               c = new HashSet<>(sp.getStringSet("c", new HashSet<String>()));
@@ -195,12 +383,12 @@ jobs:
               TextView t = new TextView(this);
               t.setText("برای هر دستگاه مشخص کنید خودکار برای چه کاری وصل شود. اگر تیک یک گزینه را نزنید، آن کار از طریق گوشی انجام می‌شود (موزیک از بلندگوی گوشی / تماس با گوشی).");
               t.setTextSize(16);
-              box.addView(t);
+              devBox.addView(t);
 
-              Button b = new Button(this);
-              b.setText("جفت‌سازی دستگاه جدید (تنظیمات بلوتوث)");
-              b.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)));
-              box.addView(b);
+              Button pair = new Button(this);
+              pair.setText("جفت‌سازی دستگاه جدید (تنظیمات بلوتوث)");
+              pair.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)));
+              devBox.addView(pair);
 
               try {
                 BluetoothAdapter ad = ((BluetoothManager) getSystemService(BLUETOOTH_SERVICE)).getAdapter();
@@ -208,7 +396,7 @@ jobs:
                 if (bonded.isEmpty()) {
                   TextView e = new TextView(this);
                   e.setText("هنوز دستگاهی جفت نشده است.");
-                  box.addView(e);
+                  devBox.addView(e);
                 }
                 for (BluetoothDevice d : bonded) {
                   final String a = d.getAddress();
@@ -216,13 +404,166 @@ jobs:
                   nm.setText(d.getName() == null ? a : d.getName());
                   nm.setTextSize(17);
                   nm.setTypeface(null, Typeface.BOLD);
-                  nm.setPadding(0, 40, 0, 0);
-                  box.addView(nm);
-                  box.addView(cb("پخش موزیک و صدا", m.contains(a), m, a));
-                  box.addView(cb("پاسخ به تماس (هندزفری)", c.contains(a), c, a));
+                  nm.setPadding(0, dp(16), 0, 0);
+                  devBox.addView(nm);
+                  devBox.addView(cb("پخش موزیک و صدا", m.contains(a), m, a));
+                  devBox.addView(cb("پاسخ به تماس (هندزفری)", c.contains(a), c, a));
                 }
               } catch (SecurityException e) { }
               if (!m.isEmpty() || !c.isEmpty()) save();
+            }
+
+            // ---------- پشتیبان‌گیری ----------
+            File backupDir() {
+              File b = getExternalFilesDir(null);
+              if (b == null) b = getFilesDir();
+              return new File(b, "backups");
+            }
+
+            String readFile(File f) throws Exception {
+              FileInputStream is = new FileInputStream(f);
+              byte[] buf = new byte[(int) f.length()];
+              int n = 0;
+              while (n < buf.length) {
+                int r = is.read(buf, n, buf.length - n);
+                if (r < 0) break;
+                n += r;
+              }
+              is.close();
+              return new String(buf, 0, n, "UTF-8");
+            }
+
+            Set<String> toSet(JSONArray a) {
+              Set<String> s = new HashSet<>();
+              if (a != null) for (int i = 0; i < a.length(); i++) s.add(a.optString(i));
+              return s;
+            }
+
+            int count(File f) {
+              try {
+                JSONObject o = new JSONObject(readFile(f));
+                Set<String> u = toSet(o.optJSONArray("m"));
+                u.addAll(toSet(o.optJSONArray("c")));
+                return u.size();
+              } catch (Exception e) { return -1; }
+            }
+
+            void takeBackup() {
+              try {
+                SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
+                JSONObject o = new JSONObject();
+                o.put("m", new JSONArray(sp.getStringSet("m", new HashSet<String>())));
+                o.put("c", new JSONArray(sp.getStringSet("c", new HashSet<String>())));
+                File dir = backupDir();
+                dir.mkdirs();
+                String name = "backup_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".json";
+                File f = new File(dir, name);
+                FileOutputStream os = new FileOutputStream(f);
+                os.write(o.toString().getBytes("UTF-8"));
+                os.close();
+                Toast.makeText(this, "پشتیبان ذخیره شد:\n" + f.getAbsolutePath(), Toast.LENGTH_LONG).show();
+                if (screen == 1) showBackups();
+              } catch (Exception e) {
+                Toast.makeText(this, "خطا در گرفتن پشتیبان", Toast.LENGTH_LONG).show();
+              }
+            }
+
+            void showBackups() {
+              screen = 1;
+              selecting = false;
+              selected.clear();
+              content.removeAllViews();
+              content.addView(backupScroll);
+              renderBackups();
+              updateBar();
+            }
+
+            void renderBackups() {
+              backupList.removeAllViews();
+              File[] fs = backupDir().listFiles();
+              List<File> files = new ArrayList<>();
+              if (fs != null) for (File f : fs) if (f.getName().endsWith(".json")) files.add(f);
+              if (files.isEmpty()) {
+                TextView e = new TextView(this);
+                e.setText("هنوز پشتیبانی گرفته نشده است.\nمنو ← پشتیبانی ← گرفتن پشتیبان");
+                e.setTextSize(16);
+                e.setPadding(dp(8), dp(24), dp(8), 0);
+                backupList.addView(e);
+                return;
+              }
+              Collections.sort(files, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+              SimpleDateFormat sdf = new SimpleDateFormat("yyyy/MM/dd   HH:mm:ss", Locale.US);
+              for (final File f : files) {
+                final String n = f.getName();
+                boolean on = selected.contains(n);
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(12), dp(14), dp(12), dp(14));
+                row.setBackgroundColor(on ? 0xFFE3F2FD : Color.TRANSPARENT);
+                if (selecting) {
+                  CheckBox k = new CheckBox(this);
+                  k.setChecked(on);
+                  k.setClickable(false);
+                  k.setFocusable(false);
+                  row.addView(k);
+                }
+                TextView t = new TextView(this);
+                int cnt = count(f);
+                t.setText(sdf.format(new Date(f.lastModified())) + "\n" + (cnt < 0 ? "فایل نامعتبر" : cnt + " دستگاه"));
+                t.setTextSize(16);
+                row.addView(t);
+                row.setOnClickListener(v -> { if (selecting) toggle(n); else confirmRestore(f); });
+                row.setOnLongClickListener(v -> { toggle(n); return true; });
+                backupList.addView(row, new LinearLayout.LayoutParams(MP, WC));
+              }
+            }
+
+            void toggle(String n) {
+              if (!selected.remove(n)) selected.add(n);
+              selecting = !selected.isEmpty();
+              renderBackups();
+              updateBar();
+            }
+
+            void exitSelection() {
+              selected.clear();
+              selecting = false;
+              renderBackups();
+              updateBar();
+            }
+
+            void confirmDelete() {
+              new AlertDialog.Builder(this)
+                  .setMessage(selected.size() + " پشتیبان حذف شود؟")
+                  .setPositiveButton("حذف", (d, w) -> {
+                    for (String s : selected) new File(backupDir(), s).delete();
+                    Toast.makeText(this, "حذف شد", Toast.LENGTH_SHORT).show();
+                    exitSelection();
+                  })
+                  .setNegativeButton("انصراف", null)
+                  .show();
+            }
+
+            void confirmRestore(final File f) {
+              new AlertDialog.Builder(this)
+                  .setMessage("این پشتیبان بازیابی شود؟ تنظیمات فعلی دستگاه‌ها جایگزین می‌شود.")
+                  .setPositiveButton("بازیابی", (d, w) -> restore(f))
+                  .setNegativeButton("انصراف", null)
+                  .show();
+            }
+
+            void restore(File f) {
+              try {
+                JSONObject o = new JSONObject(readFile(f));
+                m = toSet(o.optJSONArray("m"));
+                c = toSet(o.optJSONArray("c"));
+                save();
+                Toast.makeText(this, "بازیابی شد", Toast.LENGTH_SHORT).show();
+                showDevices();
+              } catch (Exception e) {
+                Toast.makeText(this, "فایل پشتیبان نامعتبر است", Toast.LENGTH_LONG).show();
+              }
             }
           }
           EOF
@@ -369,7 +710,7 @@ jobs:
                   } catch (Throwable e) { all = false; }
                 }
                 if (all && i >= 8) break;
-                try { Thread.sleep(i < 6 ? 500 : 2000); } catch (InterruptedException e) { return; }
+                try { Thread.sleep(i < 6 ? 700 : 3000); } catch (InterruptedException e) { return; }
               }
             }
 
@@ -402,9 +743,16 @@ jobs:
                 for (int k = 0; k < 2; k++) {
                   BluetoothProfile p = ps[k];
                   if (p == null) { if (want[k]) ok = false; continue; }
-                  boolean on = p.getConnectedDevices().contains(d);
-                  if (want[k] && !on) { call(p, "connect", d); ok = false; }
-                  else if (!want[k] && on) { call(p, "disconnect", d); ok = false; }
+                  int st = p.getConnectionState(d);
+                  if (want[k]) {
+                    if (st != BluetoothProfile.STATE_CONNECTED) {
+                      ok = false;
+                      if (st == BluetoothProfile.STATE_DISCONNECTED) call(p, "connect", d);
+                    }
+                  } else if (st == BluetoothProfile.STATE_CONNECTED) {
+                    ok = false;
+                    call(p, "disconnect", d);
+                  }
                 }
                 return ok;
               }
