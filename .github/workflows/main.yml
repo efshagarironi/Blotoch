@@ -47,7 +47,7 @@ jobs:
               minSdk 26
               targetSdk 34
               versionCode((System.currentTimeMillis().intdiv(60000L)) as int)
-              versionName '1.5'
+              versionName '1.6'
             }
             signingConfigs {
               btauto {
@@ -384,7 +384,6 @@ jobs:
                   .putStringSet("c", new HashSet<>(c))
                   .putStringSet("p", new HashSet<>(p))
                   .putStringSet("sel", u).apply();
-              // سرویس فقط وقتی بلوتوث روشن است اجرا می‌شود؛ در غیر این صورت فقط تنظیمات ذخیره می‌شود
               if (u.isEmpty()) stopService(new Intent(this, BtService.class));
               else BtService.start(this);
             }
@@ -402,7 +401,7 @@ jobs:
 
             void load() {
               devBox.removeAllViews();
-              SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
+              final SharedPreferences sp = getSharedPreferences("bt", MODE_PRIVATE);
               m = new HashSet<>(sp.getStringSet("m", new HashSet<String>()));
               c = new HashSet<>(sp.getStringSet("c", new HashSet<String>()));
               p = new HashSet<>(sp.getStringSet("p", new HashSet<String>()));
@@ -410,9 +409,25 @@ jobs:
               if (m.isEmpty() && c.isEmpty() && p.isEmpty()) { m.addAll(old); c.addAll(old); }
               p.removeAll(c);
 
+              // حالت تضمینی
+              CheckBox al = new CheckBox(this);
+              al.setText("حالت تضمینی: سرویس سبک همیشه آماده بماند تا با روشن شدن بلوتوث بلافاصله وصل کند (مصرف باتری ناچیز). اگر خاموش باشد، برنامه فقط هنگام روشن بودن بلوتوث اجرا می‌شود ولی ممکن است در بعضی گوشی‌ها خودکار بالا نیاید.");
+              al.setChecked(sp.getBoolean("always", true));
+              al.setOnCheckedChangeListener((v, on) -> {
+                sp.edit().putBoolean("always", on).apply();
+                if (on) {
+                  BtService.start(MainActivity.this);
+                } else {
+                  BluetoothAdapter a0 = BluetoothAdapter.getDefaultAdapter();
+                  if (a0 == null || !a0.isEnabled()) stopService(new Intent(MainActivity.this, BtService.class));
+                }
+              });
+              devBox.addView(al);
+
               TextView t = new TextView(this);
               t.setText("برای هر دستگاه مشخص کنید خودکار برای چه کاری وصل شود. اگر تیک یک گزینه را نزنید، آن کار از طریق گوشی انجام می‌شود. از دو گزینه «پاسخ به تماس» فقط یکی می‌تواند فعال باشد.");
               t.setTextSize(16);
+              t.setPadding(0, dp(12), 0, 0);
               devBox.addView(t);
 
               Button pair = new Button(this);
@@ -628,7 +643,6 @@ jobs:
 
           public class BootReceiver extends BroadcastReceiver {
             @Override public void onReceive(Context c, Intent i) {
-              // فقط اگر بلوتوث روشن باشد و دستگاهی انتخاب شده باشد، سرویس شروع می‌شود
               BtService.start(c);
             }
           }
@@ -642,7 +656,6 @@ jobs:
           import android.content.Context;
           import android.content.Intent;
 
-          // برنامه همیشه در پس‌زمینه نیست؛ این گیرنده با روشن/خاموش شدن بلوتوث سرویس را شروع یا متوقف می‌کند
           public class BtStateReceiver extends BroadcastReceiver {
             @Override public void onReceive(Context c, Intent i) {
               String act = i.getAction();
@@ -652,10 +665,9 @@ jobs:
                 if (s == BluetoothAdapter.STATE_TURNING_ON || s == BluetoothAdapter.STATE_ON) {
                   BtService.start(c);
                 } else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) {
-                  c.stopService(new Intent(c, BtService.class));
+                  if (!BtService.always(c)) c.stopService(new Intent(c, BtService.class));
                 }
               } else if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(act)) {
-                // پشتیبان: اگر به هر دلیل سرویس اجرا نیست ولی بلوتوث روشن است
                 if (!BtService.running) BtService.start(c);
               }
             }
@@ -701,32 +713,37 @@ jobs:
             volatile BluetoothProfile a2dp, hfp;
             final Map<String, BluetoothSocket> socks = new ConcurrentHashMap<>();
 
-            // شروع سرویس: فقط اگر بلوتوث روشن (یا در حال روشن شدن) است و دستگاهی انتخاب شده
+            // حالت تضمینی: سرویس سبک همیشه آماده می‌ماند (پیش‌فرض روشن)
+            static boolean always(Context c) {
+              return c.getSharedPreferences("bt", Context.MODE_PRIVATE).getBoolean("always", true);
+            }
+
             static void start(Context c) {
               try {
-                BluetoothAdapter a = BluetoothAdapter.getDefaultAdapter();
-                if (a == null) return;
-                int st = a.getState();
-                if (st != BluetoothAdapter.STATE_ON && st != BluetoothAdapter.STATE_TURNING_ON) return;
                 Set<String> sel = c.getSharedPreferences("bt", Context.MODE_PRIVATE).getStringSet("sel", new HashSet<String>());
                 if (sel.isEmpty()) return;
+                if (!always(c)) {
+                  BluetoothAdapter a = BluetoothAdapter.getDefaultAdapter();
+                  if (a == null) return;
+                  int st = a.getState();
+                  if (st != BluetoothAdapter.STATE_ON && st != BluetoothAdapter.STATE_TURNING_ON) return;
+                }
                 c.startForegroundService(new Intent(c, BtService.class));
               } catch (Throwable t) { }
             }
 
-            // با خاموش شدن بلوتوث، سرویس بلافاصله بسته می‌شود (تنظیمات ذخیره‌شده دست‌نخورده می‌ماند)
+            // با خاموش شدن بلوتوث همه‌ی اتصال‌ها بسته می‌شود (تنظیمات دست‌نخورده می‌ماند)
             final BroadcastReceiver rx = new BroadcastReceiver() {
               @Override public void onReceive(Context c, Intent i) {
                 int s = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
                 if (s == BluetoothAdapter.STATE_ON) begin();
                 else if (s == BluetoothAdapter.STATE_TURNING_OFF || s == BluetoothAdapter.STATE_OFF) {
                   stopAll();
-                  stopSelf();
+                  if (!always(BtService.this)) stopSelf();
                 }
               }
             };
 
-            // اگر پروفایلی که کاربر نخواسته وصل شد، فوراً قطع می‌شود
             final BroadcastReceiver rx2 = new BroadcastReceiver() {
               @Override public void onReceive(Context c, Intent i) {
                 try {
@@ -745,7 +762,6 @@ jobs:
               }
             };
 
-            // «پاسخ به تماس (گوشی)»: وقتی صدای تماس (ورودی یا خروجی) به دستگاه بلوتوث می‌رود، از آن گرفته و به گوشی داده می‌شود
             final BroadcastReceiver rx3 = new BroadcastReceiver() {
               @Override public void onReceive(Context c, Intent i) {
                 try {
@@ -798,12 +814,10 @@ jobs:
               if (st == BluetoothAdapter.STATE_ON) {
                 begin();
               } else if (st != BluetoothAdapter.STATE_TURNING_ON) {
-                // بلوتوث خاموش است؛ سرویس لازم نیست
                 stopAll();
-                stopSelf();
+                if (!always(this)) stopSelf();
               }
-              // اگر در حال روشن شدن است، گیرنده rx با STATE_ON کار را شروع می‌کند
-              return START_NOT_STICKY;
+              return always(this) ? START_STICKY : START_NOT_STICKY;
             }
 
             @Override public IBinder onBind(Intent i) { return null; }
